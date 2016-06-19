@@ -23,7 +23,7 @@ class WeakClassifier(object):
         self.sign = sign
         self.weight = weight
 
-# 12*12 subwindow
+# 10*10 subwindow
 # haar has (i,j - start) and size
 def get_haar_score(haar, subwindow):
     #print(haar.feature)
@@ -242,7 +242,6 @@ while F_i > F_target:
     best_weak_classifier = 0
     lowest_error = float("inf")
 
-    #image_weights = [1.0/(2*nrNeg)]*nrNeg + [1.0/(2*nrPos)]*nrPos
     total = sum(image_weights)
     image_weights = [w / total for w in image_weights]
 
