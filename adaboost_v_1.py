@@ -23,15 +23,75 @@ class WeakClassifier(object):
         self.sign = sign
         self.weight = weight
 
-# 10*10 subwindow
-# haar has (i,j - start) and size
-def get_haar_score(haar, subwindow):
-    #print(haar.feature)
-    #print(subwindow[haar.start[0]:haar.start[0]+haar.size*haar.shape[0],
-                               #haar.start[1]:haar.start[1]+haar.size*haar.shape[1]])
-    score=sum(sum(haar.feature*subwindow[haar.start[0]:haar.start[0]+haar.size*haar.shape[0],
-                               haar.start[1]:haar.start[1]+haar.size*haar.shape[1]]))
-    return score
+def blockSum(integral, w, h, w_kernel_size, h_kernel_size):
+    endw = w + w_kernel_size - 1
+    endh = h + h_kernel_size - 1
+    sum = integral[endh, endw]
+    if (w > 0):
+        sum -= integral[endh, w - 1]
+    if (h > 0):
+        sum -= integral[h - 1, endw]
+    if (h > 0 and w > 0):
+        sum += integral[h - 1, w - 1]
+    return sum
+
+def subwindow_integral(subwindow):
+    integral = np.zeros(subwindow.shape)
+
+    for r in range(subwindow.shape[0]):
+        for c in range(subwindow.shape[1]):
+            greyIntegralVal = subwindow[r,c]
+
+            if (r - 1 >= 0 and c - 1 >= 0):
+                greyIntegralVal -= integral[r-1,c-1]
+
+            if (r - 1 >= 0):
+                greyIntegralVal += integral[r-1,c]
+
+            if (c - 1 >= 0):
+                greyIntegralVal += integral[r,c-1]
+
+            integral[r,c]  = greyIntegralVal
+
+    return integral
+
+
+def get_haar_score_fast(haar, subwindow, subwindow_integral):
+    r = haar.start[0]
+    c = haar.start[1]
+    size_w = haar.feature.shape[1]
+    size_h = haar.feature.shape[0]
+
+    if size_w==2 and size_h==2:
+        # Simple feature, not using integral
+        if haar.type==1:
+            return subwindow[r,c]+subwindow[r+1,c]-subwindow[r,c+1]-subwindow[r+1,c+1]
+        elif haar.type==2:
+            return subwindow[r,c]+subwindow[r,c+1]-subwindow[r+1,c]-subwindow[r+1,c+1]
+        elif haar.type==5:
+            return subwindow[r,c]+subwindow[r+1,c+1]-subwindow[r,c+1]-subwindow[r+1,c]
+        elif haar.type==6:
+            return subwindow[r+1,c]+subwindow[r,c+1]-subwindow[r,c]-subwindow[r+1,c+1]
+    else:
+        # More complex features, using integral to reduce array references
+        if haar.type==1:
+            return blockSum(subwindow_integral, c, r, size_w / 2, size_h) - blockSum(subwindow_integral, c + (size_w / 2), r, size_w / 2, size_h)
+        elif haar.type==2:
+            return blockSum(subwindow_integral, c, r, size_w, size_h / 2) - blockSum(subwindow_integral, c, r + (size_h / 2), size_w, size_h / 2)
+        elif haar.type==3:
+            return blockSum(subwindow_integral, c, r, size_w, size_h) - 2 * blockSum(subwindow_integral, c + (size_w / 3), r, size_w / 3, size_h)
+        elif haar.type==4:
+            return blockSum(subwindow_integral, c, r, size_w, size_h) - 2 * blockSum(subwindow_integral, c, r + (size_h / 3), size_w, size_h / 3)
+        elif haar.type==5:
+            return blockSum(subwindow_integral, c, r, size_w, size_h) - 2 * (blockSum(subwindow_integral, c + (size_w / 2), r ,size_w / 2, size_h / 2) + blockSum(subwindow_integral, c, r + (size_h / 2), size_w / 2, size_h / 2))
+        elif haar.type==6:
+            return blockSum(subwindow_integral, c, r, size_w, size_h) - 2 * (blockSum(subwindow_integral, c, r, size_w / 2, size_h / 2) + blockSum(subwindow_integral, c + (size_w / 2), r + (size_h / 2), size_w / 2, size_h / 2))
+        elif haar.type==7:
+            if (size_w == 3):
+                return blockSum(subwindow_integral, c,r, size_w, size_h) - 2 * subwindow[r + 1, c + 1]
+            else:
+                return blockSum(subwindow_integral, c, r, size_w, size_h) - 2 * blockSum(subwindow_integral, c + (size_w / 3), r + (size_h / 3), size_w / 3, size_h / 3)
+
 
 
 def feature_weighted_error_rate(actual, predicted, weights):
@@ -57,6 +117,14 @@ def get_positive_samples(path):
             positive_samples.append(cv2.resize(np.loadtxt(path + file), (window_size,window_size), interpolation=cv2.INTER_NEAREST))
     return positive_samples
 
+def get_negative_samples_prefiltered(path):
+    global window_size
+    positive_samples = []
+    for file in os.listdir(path):
+        if not file.endswith(".jpg"):
+            positive_samples.append(cv2.resize(np.loadtxt(path + file), (window_size,window_size), interpolation=cv2.INTER_NEAREST))
+    return positive_samples
+
 def get_nagetive_samples(labeled_set_file, path2samples):
     global window_size
     negative_samples = []
@@ -65,6 +133,7 @@ def get_nagetive_samples(labeled_set_file, path2samples):
     for file in files:
         line = file.split("^J")
         coords =  (line[-1]).split(")(")
+
 
         fovea_grey = []
         f=open(path2samples + line[0]+"^J")
@@ -81,14 +150,15 @@ def get_nagetive_samples(labeled_set_file, path2samples):
         for i in range(len(coords)):
             coords[i] = coords[i].strip(" ()\n")
 
+
         if len(coords)>1:
             a,b,c,d = [int(coord) for coord in (coords[-2] + "," + coords[-1]).split(",")]
             if b<d and a<c:
 
                 #display(fovea_grey[b:d, a:c])
                 #negative_samples.append(cv2.resize(fovea_grey[b:d, a:c], (10,10), interpolation=cv2.INTER_NEAREST))
-                for i in [x for x in range(0, fovea_grey.shape[0]-window_size, window_size/2) if x not in range(b-window_size/2, d+window_size/2)]:
-                    for j in [x for x in range(0, fovea_grey.shape[1]-window_size, window_size/2) if x not in range(a-window_size/2, c+window_size/2)]:
+                for i in [x for x in range(0, fovea_grey.shape[0]-window_size,3) if x not in range(b-window_size/2, d+window_size/2)]:
+                    for j in [x for x in range(0, fovea_grey.shape[1]-window_size,3) if x not in range(a-window_size/2, c+window_size/2)]:
                         negative_sample = fovea_grey[i:i+window_size, j:j+window_size]
                         #display(negative_sample)
                         negative_samples.append(negative_sample)
@@ -96,7 +166,7 @@ def get_nagetive_samples(labeled_set_file, path2samples):
     return negative_samples
 
 # Generate positive samples
-positive_samples = get_positive_samples("code_cc/training+/")
+positive_samples = get_positive_samples("code_robocup/training/")
 #for i in range(len(positive_samples)):
 #    plt.imshow(positive_samples[i], interpolation='nearest', cmap='Greys_r')
 #    plt.savefig("positives/"+str(i))
@@ -104,7 +174,22 @@ positive_samples_rotated = [np.rot90(np.rot90(np.rot90(el))) for el in positive_
 positive_samples = positive_samples + positive_samples_rotated
 
 # Generate Negative samples
-negative_samples = get_nagetive_samples("code_cc/output", "code_cc/cc/")
+#negative_samples = get_nagetive_samples("code_robocup/output", "code_robocup/recs/")
+negative_samples = get_negative_samples_prefiltered("code_robocup/filterOutNeg/")
+'''n_cnt = 0
+print(len(negative_samples))
+for el in negative_samples[:5000]:
+    ballfovea = open("code_robocup/filterOutNeg/"+str(n_cnt), "w")
+    for r in range(len(el)):
+        for c in range(len(el[0])):
+          ballfovea.write(str(el[r][c]))
+          ballfovea.write(" ")
+        ballfovea.write("\n")
+    ballfovea.close()
+    n_cnt+=1
+import sys
+sys.exit()'''
+
 #negative_samples_rotated = [np.rot90(np.rot90(np.rot90(el))) for el in negative_samples]
 #negative_samples = negative_samples + negative_samples_rotated
 
@@ -122,6 +207,9 @@ neg_split = int(len(negative_samples)*split)
 
 training_set = positive_samples[0:pos_split] + negative_samples[0:neg_split]
 testing_set = positive_samples[pos_split:] + negative_samples[neg_split:]
+
+training_integrals = [subwindow_integral(el) for el in training_set]
+testing_integrals = [subwindow_integral(el) for el in testing_set]
 
 nrPos = pos_split
 nrNeg = neg_split
@@ -217,6 +305,37 @@ weak_classifires = []
 np.random.shuffle(features)
 
 
+errors = []
+scores = []
+thetas = []
+polarities = []
+# For every feature, find best threshold and compute corresponding weighted error
+for j in features:
+    avgPosScore = 0.0
+    avgNegScore = 0.0
+    # Apply feature to each image and get threshold for current feature (current location)
+    for i in range(len(training_set)):
+        score=get_haar_score_fast(j, training_set[i], training_integrals[i])
+        scores.append(score)
+
+        if training_labels[i]==1:
+            avgPosScore += score
+        else:
+            avgNegScore += score
+
+    avgPosScore = avgPosScore / nrPos
+    avgNegScore = avgNegScore / nrNeg
+    if avgPosScore>avgNegScore:
+        polarity = 1
+    else:
+        polarity = -1
+    polarities.append(polarity)
+
+    # Optimal theta found
+    theta = (avgPosScore + avgNegScore) / 2
+    thetas.append(theta)
+
+
 ### Cascade Creation ###
 
 F_target = 0.001
@@ -229,74 +348,50 @@ F_i = 1
 cascade = []
 start_time = time.time()
 
-image_weights = [1.0/(2*nrNeg)]*nrNeg + [1.0/(2*nrPos)]*nrPos
+image_weights = [1.0/(2*nrPos)]*nrPos + [1.0/(2*nrNeg)]*nrNeg
 
 show_stuff = False
 
 while F_i > F_target:
     #i += 1
-
     ## Train classifier for stage i
 
-    best_feature_index = 0
+    #best_feature_index = 0
     best_weak_classifier = 0
     lowest_error = float("inf")
 
+    #image_weights = [1.0/(2*nrNeg)]*nrNeg + [1.0/(2*nrPos)]*nrPos
     total = sum(image_weights)
     image_weights = [w / total for w in image_weights]
+    TP=0
+    TN=0
 
     f_i = 1
     cycle = 0
 
-    while f_i > f:
-        print("f_i in loop: "+str(f_i))
+    #while f_i > f: # change condition TP>0.5 and TN>0.5 ?!
+    while (TP/nrPos<0.5) and (TN/nrNeg<0.5):
         total = sum(image_weights)
         if total != 1:
             image_weights = [w / total for w in image_weights]
 
-        print()
+        print(" ")
         errors = []
         # For every feature, find best threshold and compute corresponding weighted error
+        loop_cnt = 0
+        inner_loop_cnt = 0
         for j in features:
-            posProb = 0
-            avgPosScore = 0.0
-            negProb = 0
-            avgNegScore = 0.0
-            # Apply feature to each image and get threshold for current feature (current location)
-            for i in range(len(training_set)):
-                score=get_haar_score(j, training_set[i])
-                if training_labels[i]==1:
-                    posProb +=image_weights[i]
-                    avgPosScore += score
-                    #avgPosScore += score*image_weights[i]
-                else:
-                    negProb +=image_weights[i]
-                    avgNegScore += score
-                    #avgNegScore += score*image_weights[i]
-
-            avgPosScore = avgPosScore / nrPos
-            #avgPosScore = avgPosScore / posProb
-            avgNegScore = avgNegScore / nrNeg
-            #avgNegScore = avgNegScore / negProb
-            polarity = 0
-            if avgPosScore>avgNegScore:
-                polarity = 1
-            else:
-                polarity = -1
-
-            # Optimal theta found
-            theta = (avgPosScore + avgNegScore) / 2
-            #print("Theta: " + str(theta))
 
             # Create classifier object
-            w_classif = WeakClassifier(j, theta, polarity, 0)
+            w_classif = WeakClassifier(j, thetas[loop_cnt], polarities[loop_cnt], 0)
 
             # Compute weighted error
             predicted = []
-            for sample in training_set:
+            for sample in range(len(training_set)):
                 # Get predictions of all samples
-                score=get_haar_score(j, sample)
+                score=scores[inner_loop_cnt]
                 predicted.append(predict(score, w_classif))
+                inner_loop_cnt += 1
 
             weighted_error=feature_weighted_error_rate(training_labels, predicted, image_weights)
             errors.append(weighted_error)
@@ -305,9 +400,11 @@ while F_i > F_target:
             if weighted_error<lowest_error:
                 lowest_error = weighted_error
                 best_weak_classifier = w_classif
-                best_feature_index = features.index(j)
+                #best_feature_index = features.index(j)
 
-        print("Best feature index: "+str(best_feature_index))
+            loop_cnt+=1
+
+        #print("Best feature index: "+str(best_feature_index))
 
         if show_stuff:
             plt.plot(errors)
@@ -325,9 +422,9 @@ while F_i > F_target:
         ## Update weights and evaluate current weak classifier ##
         predicted=[]
         scores_debug = []
-        for sample in training_set:
+        for sample in range(len(training_set)):
             # Get weighted classification error
-            score=get_haar_score(best_weak_classifier.haar, sample)
+            score=get_haar_score_fast(best_weak_classifier.haar, training_set[sample], training_integrals[sample])
             scores_debug.append(score)
             predicted.append(predict(score, best_weak_classifier))
 
@@ -390,7 +487,7 @@ while F_i > F_target:
     for l in range(len(training_set)):
         strong_score = 0.0
         for w_class in cascade:
-            strong_score += w_class.weight * predict(get_haar_score(w_class.haar, training_set[l]), w_class)
+            strong_score += w_class.weight * predict(get_haar_score_fast(w_class.haar, training_set[l], training_integrals[l]), w_class)
         cascade_scores.append(strong_score)
         clas = np.sign(strong_score)
         if clas==-1:
@@ -444,9 +541,9 @@ for el in cascade:
     print(el.sign)'''
 
     print("// Compute "+str(f_cnt)+" feature score")
-    print("vote = f_vote(greyIntegral, "+str(el.haar.type)+", w, h, "+
-          str(el.haar.feature.shape[1])+", "+str(el.haar.feature.shape[0])+", "+str(el.haar.start[1])+", "+str(el.haar.start[0])+", "
-          +str(int(round(el.theta)))+", "+str(el.weight*el.sign)+", fovea);")
+    print("vote = f_vote(greyIntegral, "+str(el.haar.type)+", w, h, scale*"+
+          str(el.haar.feature.shape[1])+", scale*"+str(el.haar.feature.shape[0])+", scale*"+str(el.haar.start[1])+", scale*"+str(el.haar.start[0])+
+          ", scaleTh*"+str(int(round(el.theta)))+", "+str(el.weight*el.sign)+", fovea);")
     print("cascade_score += vote;")
 
     f_cnt+=1
@@ -457,7 +554,7 @@ for t in range(len(testing_set)):
     strong_score = 0.0
     for w_class in cascade:
         #print("Loc: " +str(w_class.haar.start))
-        strong_score += w_class.weight * predict(get_haar_score(w_class.haar, testing_set[t]), w_class)
+        strong_score += w_class.weight * predict(get_haar_score_fast(w_class.haar, testing_set[t], testing_integrals[t]), w_class)
     clas = np.sign(strong_score)
     scores.append(strong_score)
 
@@ -498,4 +595,5 @@ plt.show()
 
 print("TP, TN, FP, FN for the cascade classifier:")
 print(TP_test/nrPos_test, TN_test/nrNeg_test, FP_test/nrNeg_test, FN_test/nrPos_test)
+
 
